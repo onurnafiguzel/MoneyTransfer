@@ -52,6 +52,7 @@ public static class CreateTransfer
         return error switch
         {
             MovementError.DuplicateRequest => ApiResults.Conflict(ErrorCodes.RequestInProgress, "a concurrent request with the same Idempotency-Key is being processed"),
+            MovementError.Contention => ApiResults.ServiceUnavailable(ErrorCodes.TooMuchContention, "the transfer could not complete due to contention; retry shortly"),
             MovementError.AccountNotFound => ApiResults.NotFound(ErrorCodes.AccountNotFound, "source or destination account not found"),
             MovementError.CurrencyMismatch => ApiResults.UnprocessableEntity(ErrorCodes.CurrencyMismatch, "accounts have different currencies"),
             MovementError.InsufficientFunds => ApiResults.UnprocessableEntity(ErrorCodes.InsufficientFunds, "source account has insufficient funds"),

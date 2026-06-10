@@ -43,6 +43,7 @@ public static class ReverseTransfer
         return error switch
         {
             ReverseError.DuplicateRequest => ApiResults.Conflict(ErrorCodes.RequestInProgress, "a concurrent request with the same Idempotency-Key is being processed"),
+            ReverseError.Contention => ApiResults.ServiceUnavailable(ErrorCodes.TooMuchContention, "the reversal could not complete due to contention; retry shortly"),
             ReverseError.NotFound => ApiResults.NotFound(ErrorCodes.NotFound, "transfer not found"),
             ReverseError.AlreadyReversed => ApiResults.Conflict(ErrorCodes.AlreadyReversed, "transfer has already been reversed"),
             ReverseError.InsufficientFunds => ApiResults.UnprocessableEntity(ErrorCodes.InsufficientFunds, "counterparty has insufficient funds to reverse"),

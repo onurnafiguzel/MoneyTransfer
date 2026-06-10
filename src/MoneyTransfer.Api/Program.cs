@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using MoneyTransfer.Api.Features.Accounts;
 using MoneyTransfer.Api.Features.Deposits;
+using MoneyTransfer.Api.Features.Metrics;
 using MoneyTransfer.Api.Features.Transfers;
 using MoneyTransfer.Api.Features.Withdrawals;
 using MoneyTransfer.Api.Infrastructure;
@@ -27,6 +28,10 @@ builder.Services.AddKeyedScoped<IBalanceMutator, PessimisticMutator>("pessimisti
 builder.Services.AddKeyedScoped<IBalanceMutator, ConditionalUpdateMutator>("conditional");
 builder.Services.AddKeyedScoped<IBalanceMutator, OptimisticCasMutator>("optimistic");
 builder.Services.AddScoped<IBalanceMutatorResolver, BalanceMutatorResolver>();
+
+// Process-wide contention counters (retries/deadlocks/serialization/exhaustions) — observability for the
+// retry policy, so load tests can prove deadlocks happened and were recovered.
+builder.Services.AddSingleton<ContentionMetrics>();
 
 builder.Services.AddScoped<LedgerService>();
 
@@ -73,5 +78,6 @@ app.MapGetBalance();
 app.MapGetEntries();
 app.MapCreateDeposit();
 app.MapCreateWithdrawal();
+app.MapGetContentionMetrics();
 
 app.Run();

@@ -6,9 +6,9 @@ using Npgsql;
 
 namespace MoneyTransfer.Api.Infrastructure.Movement;
 
-public enum MovementError { None, AccountNotFound, CurrencyMismatch, InsufficientFunds, DuplicateRequest }
+public enum MovementError { None, AccountNotFound, CurrencyMismatch, InsufficientFunds, DuplicateRequest, Contention }
 
-public enum ReverseError { None, NotFound, AlreadyReversed, InsufficientFunds, AccountNotFound, DuplicateRequest }
+public enum ReverseError { None, NotFound, AlreadyReversed, InsufficientFunds, AccountNotFound, DuplicateRequest, Contention }
 
 /// <summary>
 /// Money-movement engine. Each movement runs in a single DB transaction (atomic). The concurrency-critical
@@ -20,6 +20,7 @@ public sealed class LedgerService(
     LedgerDbContext db,
     IBalanceMutatorResolver mutators,
     IOptions<LedgerOptions> options,
+    ContentionMetrics metrics,
     ILogger<LedgerService> logger)
 {
     private readonly int _maxRetries = options.Value.MaxConcurrencyRetries;
@@ -35,10 +36,21 @@ public sealed class LedgerService(
         {
             try
             {
-                return await ExecuteOnceAsync(mutator, cmd, kind, reason, reversedTxId, idempotencyKey, requestHash, ct);
+                var result = await ExecuteOnceAsync(mutator, cmd, kind, reason, reversedTxId, idempotencyKey, requestHash, ct);
+                if (attempt > 0) metrics.RecordRecovery(); // completed after contention — the recovery we want to prove
+                return result;
             }
-            catch (Exception ex) when (IsTransient(ex) && attempt < _maxRetries)
+            catch (Exception ex) when (IsTransient(ex))
             {
+                metrics.RecordTransient(ex);
+                if (attempt >= _maxRetries)
+                {
+                    // Budget exhausted. In a zero-tolerance domain this is a TRANSIENT, retryable condition —
+                    // not a server bug — so we surface a deterministic 503 (Contention), never a raw 500.
+                    metrics.RecordExhaustion();
+                    logger.LogWarning("Movement contention EXHAUSTED after {Max} retries: {Error}", _maxRetries, ex.GetType().Name);
+                    return (null, MovementError.Contention);
+                }
                 db.ChangeTracker.Clear(); // discard tracked state from the rolled-back attempt
                 logger.LogWarning("Movement contention (attempt {Attempt}/{Max}): {Error}; retrying", attempt + 1, _maxRetries, ex.GetType().Name);
                 await Task.Delay(BackoffMs(attempt), ct);
@@ -124,6 +136,7 @@ public sealed class LedgerService(
                 MovementError.None => (reversal, ReverseError.None),
                 MovementError.InsufficientFunds => (null, ReverseError.InsufficientFunds),
                 MovementError.DuplicateRequest => (null, ReverseError.DuplicateRequest),
+                MovementError.Contention => (null, ReverseError.Contention),
                 _ => (null, ReverseError.AccountNotFound),
             };
         }

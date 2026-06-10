@@ -49,6 +49,7 @@ public static class CreateDeposit
         return error switch
         {
             MovementError.DuplicateRequest => ApiResults.Conflict(ErrorCodes.RequestInProgress, "a concurrent request with the same Idempotency-Key is being processed"),
+            MovementError.Contention => ApiResults.ServiceUnavailable(ErrorCodes.TooMuchContention, "the deposit could not complete due to contention; retry shortly"),
             MovementError.AccountNotFound => ApiResults.NotFound(ErrorCodes.AccountNotFound, "account not found"),
             _ => Results.Problem(statusCode: StatusCodes.Status500InternalServerError),
         };

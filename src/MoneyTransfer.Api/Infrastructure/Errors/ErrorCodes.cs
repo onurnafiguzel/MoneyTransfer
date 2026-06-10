@@ -17,4 +17,7 @@ public static class ErrorCodes
     public const string IdempotencyKeyRequired = "idempotency_key_required";
     public const string IdempotencyKeyReuse = "idempotency_key_reuse";
     public const string RequestInProgress = "request_in_progress";
+
+    // Concurrency: retry budget exhausted under contention (deadlock/serialization) — transient, retryable.
+    public const string TooMuchContention = "too_much_contention";
 }

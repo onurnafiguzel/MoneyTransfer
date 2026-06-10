@@ -33,16 +33,24 @@ public static class CreateTransfer
             return ApiResults.UnprocessableEntity(ErrorCodes.SelfTransfer, "source and destination accounts must differ");
 
         var hash = hasher.ForTransfer(req.FromAccount, req.ToAccount, req.Amount, req.Reason);
-        var pre = await idem.CheckAsync(key, hash, ct);
+        var pre = await idem.BeginAsync(key, hash, ct);
         if (pre.Decision == IdempotencyDecision.Reuse)
             return ApiResults.UnprocessableEntity(ErrorCodes.IdempotencyKeyReuse, "Idempotency-Key was already used with a different request");
+        if (pre.Decision == IdempotencyDecision.InProgress)
+            return ApiResults.Conflict(ErrorCodes.RequestInProgress, "a concurrent request with the same Idempotency-Key is being processed");
         if (pre.Decision == IdempotencyDecision.Replay)
             return Results.Created($"/transfers/{pre.TxId}", new { txId = pre.TxId, createdAt = pre.CreatedAt });
 
         var (tx, error) = await ledger.MoveAsync(req.FromAccount, req.ToAccount, req.Amount, TransferKind.Transfer, req.Reason, null, key, hash, ct);
+        if (error == MovementError.None)
+        {
+            await idem.CompleteAsync(key, hash, tx!.Id, tx.CreatedAt);
+            return Results.Created($"/transfers/{tx.Id}", new { txId = tx.Id, createdAt = tx.CreatedAt });
+        }
+
+        await idem.ReleaseAsync(key); // free the in_progress lock so a corrected retry isn't blocked
         return error switch
         {
-            MovementError.None => Results.Created($"/transfers/{tx!.Id}", new { txId = tx.Id, createdAt = tx.CreatedAt }),
             MovementError.DuplicateRequest => ApiResults.Conflict(ErrorCodes.RequestInProgress, "a concurrent request with the same Idempotency-Key is being processed"),
             MovementError.AccountNotFound => ApiResults.NotFound(ErrorCodes.AccountNotFound, "source or destination account not found"),
             MovementError.CurrencyMismatch => ApiResults.UnprocessableEntity(ErrorCodes.CurrencyMismatch, "accounts have different currencies"),

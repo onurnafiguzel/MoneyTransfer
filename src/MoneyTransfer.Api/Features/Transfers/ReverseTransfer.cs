@@ -24,16 +24,24 @@ public static class ReverseTransfer
             return ApiResults.BadRequest(ErrorCodes.IdempotencyKeyRequired, "Idempotency-Key header is required");
 
         var hash = hasher.ForReversal(txId, req?.Reason);
-        var pre = await idem.CheckAsync(key, hash, ct);
+        var pre = await idem.BeginAsync(key, hash, ct);
         if (pre.Decision == IdempotencyDecision.Reuse)
             return ApiResults.UnprocessableEntity(ErrorCodes.IdempotencyKeyReuse, "Idempotency-Key was already used with a different request");
+        if (pre.Decision == IdempotencyDecision.InProgress)
+            return ApiResults.Conflict(ErrorCodes.RequestInProgress, "a concurrent request with the same Idempotency-Key is being processed");
         if (pre.Decision == IdempotencyDecision.Replay)
             return Results.Created($"/transfers/{pre.TxId}", new { reversalTxId = pre.TxId });
 
         var (reversal, error) = await ledger.ReverseAsync(txId, req?.Reason, key, hash, ct);
+        if (error == ReverseError.None)
+        {
+            await idem.CompleteAsync(key, hash, reversal!.Id, reversal.CreatedAt);
+            return Results.Created($"/transfers/{reversal.Id}", new { reversalTxId = reversal.Id });
+        }
+
+        await idem.ReleaseAsync(key);
         return error switch
         {
-            ReverseError.None => Results.Created($"/transfers/{reversal!.Id}", new { reversalTxId = reversal.Id }),
             ReverseError.DuplicateRequest => ApiResults.Conflict(ErrorCodes.RequestInProgress, "a concurrent request with the same Idempotency-Key is being processed"),
             ReverseError.NotFound => ApiResults.NotFound(ErrorCodes.NotFound, "transfer not found"),
             ReverseError.AlreadyReversed => ApiResults.Conflict(ErrorCodes.AlreadyReversed, "transfer has already been reversed"),

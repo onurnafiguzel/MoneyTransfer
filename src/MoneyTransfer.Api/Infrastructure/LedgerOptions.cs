@@ -23,4 +23,14 @@ public sealed class LedgerOptions
 
     /// <summary>Bounded retries for transient contention (serialization/deadlock) and optimistic CAS.</summary>
     public int MaxConcurrencyRetries { get; set; } = 8;
+
+    /// <summary>
+    /// TTL (seconds) of the Redis "in_progress" idempotency lock. Short — it only needs to cover one
+    /// request's lifetime; if the process dies mid-request the lock self-heals when it expires.
+    /// </summary>
+    public int IdempotencyLockTtlSeconds { get; set; } = 30;
+
+    /// <summary>TTL (seconds) of the cached "completed" idempotency result in Redis (replay window). The DB
+    /// backstop is permanent regardless, so this only bounds how long the fast Redis replay path is served.</summary>
+    public int IdempotencyCompletedTtlSeconds { get; set; } = 86_400; // 24h
 }

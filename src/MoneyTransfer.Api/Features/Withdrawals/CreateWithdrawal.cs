@@ -30,16 +30,24 @@ public static class CreateWithdrawal
             return ApiResults.UnprocessableEntity(ErrorCodes.InvalidAmount, $"amount must be between 1 and {max} minor units");
 
         var hash = hasher.ForWithdrawal(req.Account, req.Amount, req.Reason);
-        var pre = await idem.CheckAsync(key, hash, ct);
+        var pre = await idem.BeginAsync(key, hash, ct);
         if (pre.Decision == IdempotencyDecision.Reuse)
             return ApiResults.UnprocessableEntity(ErrorCodes.IdempotencyKeyReuse, "Idempotency-Key was already used with a different request");
+        if (pre.Decision == IdempotencyDecision.InProgress)
+            return ApiResults.Conflict(ErrorCodes.RequestInProgress, "a concurrent request with the same Idempotency-Key is being processed");
         if (pre.Decision == IdempotencyDecision.Replay)
             return Results.Created($"/transfers/{pre.TxId}", new { txId = pre.TxId, createdAt = pre.CreatedAt });
 
         var (tx, error) = await ledger.WithdrawAsync(req.Account, req.Amount, req.Reason, key, hash, ct);
+        if (error == MovementError.None)
+        {
+            await idem.CompleteAsync(key, hash, tx!.Id, tx.CreatedAt);
+            return Results.Created($"/transfers/{tx.Id}", new { txId = tx.Id, createdAt = tx.CreatedAt });
+        }
+
+        await idem.ReleaseAsync(key);
         return error switch
         {
-            MovementError.None => Results.Created($"/transfers/{tx!.Id}", new { txId = tx.Id, createdAt = tx.CreatedAt }),
             MovementError.DuplicateRequest => ApiResults.Conflict(ErrorCodes.RequestInProgress, "a concurrent request with the same Idempotency-Key is being processed"),
             MovementError.AccountNotFound => ApiResults.NotFound(ErrorCodes.AccountNotFound, "account not found"),
             MovementError.InsufficientFunds => ApiResults.UnprocessableEntity(ErrorCodes.InsufficientFunds, "account has insufficient funds"),

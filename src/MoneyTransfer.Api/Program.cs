@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using MoneyTransfer.Api.Features.Accounts;
 using MoneyTransfer.Api.Features.Deposits;
 using MoneyTransfer.Api.Features.Transfers;
@@ -7,6 +8,7 @@ using MoneyTransfer.Api.Infrastructure;
 using MoneyTransfer.Api.Infrastructure.Idempotency;
 using MoneyTransfer.Api.Infrastructure.Movement;
 using MoneyTransfer.Api.Infrastructure.Persistence;
+using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -28,8 +30,21 @@ builder.Services.AddScoped<IBalanceMutatorResolver, BalanceMutatorResolver>();
 
 builder.Services.AddScoped<LedgerService>();
 
-// Idempotency (Step A — DB-backed dedup + request hashing collision guard; Redis layer comes next).
+// Idempotency: request hashing + DB backstop (Step A) with an optional Redis fast path (Step B).
 builder.Services.AddSingleton<RequestHasher>();
+var redisConnection = builder.Configuration.GetConnectionString("Redis");
+if (!string.IsNullOrWhiteSpace(redisConnection))
+{
+    var redisOptions = ConfigurationOptions.Parse(redisConnection);
+    redisOptions.AbortOnConnectFail = false; // don't crash on startup if Redis is briefly unavailable; degrade gracefully
+    builder.Services.AddSingleton<IConnectionMultiplexer>(ConnectionMultiplexer.Connect(redisOptions));
+}
+// Resolve the multiplexer optionally: absent (no Redis configured) → the store reports Unavailable and the
+// coordinator runs on the DB backstop alone.
+builder.Services.AddSingleton(sp => new RedisIdempotencyStore(
+    sp.GetService<IConnectionMultiplexer>(),
+    sp.GetRequiredService<IOptions<LedgerOptions>>(),
+    sp.GetRequiredService<ILogger<RedisIdempotencyStore>>()));
 builder.Services.AddScoped<IdempotencyService>();
 
 builder.Services.AddProblemDetails();

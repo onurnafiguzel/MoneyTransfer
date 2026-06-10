@@ -1,9 +1,10 @@
 # Idempotency — Aynı İsteği İki Kez Almak
 
 > Öğretici rehber. Para transferi gibi sistemlerde **client tarafı tekrarının** (retry, çift-tık,
-> Postman replay) ikinci kez para hareketine yol açmasını nasıl engelleriz. Bu doküman **Adım A**'yı
-> anlatır: idempotency'nin **DB-garantili çekirdeği** + **request hashing** collision guard. Redis
-> ön-kontrol katmanı (**Adım B**) ayrı bir feature'dır. İlgili: [race-condition.md](race-condition.md).
+> Postman replay) ikinci kez para hareketine yol açmasını nasıl engelleriz. İki katman: **Adım A** —
+> idempotency'nin **DB-garantili çekirdeği** + **request hashing** collision guard; **Adım B** — **Redis**
+> hızlı yol (durum makinesi + yanıt önbelleği), DB backstop bozulmadan + graceful degradation.
+> İlgili: [race-condition.md](race-condition.md).
 
 ---
 
@@ -123,27 +124,66 @@ kopyalar ya 409 (retry edilebilir) alır ya da kazananın sonucunu replay eder.
 
 ---
 
-## Sınırlar ve Sıradaki Adım (Redis — Adım B)
+## Adım B — Redis hızlı yol (uygulandı)
 
-Adım A tamamen doğrudur ama iki sınırı vardır; ikisini de **Redis katmanı** (Adım B) çözecek:
+Adım A doğrudur ama her tekrarlanan istek yine de uygulama + bir DB sorgusu kadar ilerler ve eş zamanlı
+kopya net bir `in_progress` durumu görmez (409 alıp retry eder). **Redis katmanı** ikisini de çözer:
+yinelenenleri **DB'ye varmadan** reddeder ve bir `in_progress` → `completed` durum makinesi + yanıt
+önbelleği sunar.
 
-- **DB'ye varır:** Tekrarlanan istek yine de uygulama + bir DB sorgusu kadar ilerler. Redis ön-kontrolü,
-  yinelenenleri **DB'ye varmadan** reddeder (daha ucuz, istismara dayanıklı).
-- **`in_progress` durumu yok:** Adım A'da eş zamanlı kopya 409 alıp retry eder. Redis durum makinesi
-  (`in_progress` → `completed` + yanıt önbelleği) ile ilk istek tamamlanana kadar kopyalar net bir
-  409 `request_in_progress` görür, tamamlanınca **kaydedilmiş yanıtı** alır.
+Akış, her yazma handler'ının çağırdığı koordinatörde
+([`IdempotencyService`](../src/MoneyTransfer.Api/Infrastructure/Idempotency/IdempotencyService.cs)) iki
+katmanlıdır — önce Redis, sonra DB:
 
-Önemli tasarım kararı: **Redis bir hızlandırma katmanıdır, doğruluğun kaynağı değil.** Redis düşer ya da
-bir anahtarı evict ederse, buradaki **DB backstop** devreye girer (graceful degradation) — idempotency
-Redis TTL'inin ötesinde **kalıcı** kalır. Production-grade sıralama bu yüzden **önce DB (doğruluk),
-sonra Redis (performans)**'tır.
+```mermaid
+flowchart TD
+    A[BeginAsync key, hash] --> R{"Redis: SET idem:key in_progress NX EX"}
+    R -->|kayıt var, hash farklı| RU[Reuse → 422]
+    R -->|kayıt var, completed| RP[Replay → 201 kayıtlı txId]
+    R -->|kayıt var, in_progress| IP[InProgress → 409]
+    R -->|kilit alındı / Redis yok| DB{"DB backstop (Step A)"}
+    DB -->|var, aynı hash| RP2["Replay (+ Redis'i completed'a doldur)"]
+    DB -->|var, farklı hash| RU2[Reuse → 422]
+    DB -->|yok| P[Proceed → hareketi uygula]
+    P --> S{Başarılı mı?}
+    S -->|evet| C["CompleteAsync → Redis completed + txId önbellek"]
+    S -->|hayır| REL["ReleaseAsync → in_progress kilidini sil"]
+
+    style RP fill:#1f6f3a,color:#fff
+    style RP2 fill:#1f6f3a,color:#fff
+    style C fill:#1f6f3a,color:#fff
+    style RU fill:#7a1f1f,color:#fff
+    style RU2 fill:#7a1f1f,color:#fff
+    style IP fill:#8a5a00,color:#fff
+```
+
+- **`SET … NX EX`** atomik kilit: ilk istek `in_progress` kilidini alır ve ilerler; eş zamanlı kopya
+  ya `in_progress` (→409) görür ya da kazanan bitince **`completed` önbelleğini** (→replay, DB'ye uğramadan).
+- Handler hareketten sonra **tam olarak birini** çağırır: başarıda `CompleteAsync` (sonucu önbelleğe yazar),
+  başarısızlıkta `ReleaseAsync` (kilidi siler → düzeltilmiş retry bloklanmaz).
+- Kilit TTL'i **kısa** (varsayılan 30s) — süreç istek ortasında ölürse kilit kendi kendine iyileşir;
+  `completed` TTL'i uzun (24s) yalnızca hızlı-replay penceresini sınırlar.
+
+### Graceful degradation — Redis düşerse
+
+Önemli tasarım kararı: **Redis bir hızlandırma katmanıdır, doğruluğun kaynağı değil.** Her Redis çağrısı
+best-effort'tur; herhangi bir bağlantı hatası
+([`RedisIdempotencyStore`](../src/MoneyTransfer.Api/Infrastructure/Idempotency/RedisIdempotencyStore.cs))
+`Unavailable` döner ve koordinatör **DB backstop'a düşer** (Adım A davranışı). Redis kapalıyken bile:
+idempotency **bozulmaz** (en fazla tekrarlanan istek DB'ye kadar gider). `AbortOnConnectFail=false` ile
+uygulama Redis yokken de ayağa kalkar. Konfig'de `ConnectionStrings:Redis` boşsa Redis katmanı hiç
+devreye girmez — saf Adım A çalışır (yerel `dotnet run` varsayılanı budur; Docker stack'i Redis'i bağlar).
+
+Production-grade sıralama bu yüzden **önce DB (doğruluk), sonra Redis (performans)**'tır.
 
 ---
 
 ## Doğrulama
 
 - `k6/02-idempotency.js` — aynı anahtarla N eş zamanlı özdeş istek → para tam bir kez hareket eder,
-  self-audit tutar, replay para taşımaz, farklı-payload-aynı-key → 422.
+  self-audit tutar, replay para taşımaz, farklı-payload-aynı-key → 422. (Redis açıkken kopyalar
+  in_progress/replay görür; semantik aynı kalır.)
 - Postman "Idempotency" klasörü — replay (#1/#2 aynı txId), reuse (422), eksik key (400).
+- **Degradation:** Redis container'ı durdurulup aynı senaryo → idempotency DB backstop ile hâlâ tutar.
 - Mevcut k6 (01-race, 03-ring) ve newman regresyonu: her yazma artık istek başına benzersiz anahtar
   taşır → meşru özdeş hareketler bloklanmaz.

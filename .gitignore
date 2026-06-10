@@ -1,0 +1,70 @@
+# ---------------------------------------------------------------------------
+# .NET build output & binaries
+# ---------------------------------------------------------------------------
+bin/
+obj/
+out/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+publish/
+artifacts/
+
+# Compiled binaries / assemblies / debug symbols
+*.dll
+*.exe
+*.pdb
+*.so
+*.dylib
+*.o
+*.obj
+*.lib
+*.a
+*.winmd
+*.mdb
+
+# ---------------------------------------------------------------------------
+# Caches & generated/intermediate files
+# ---------------------------------------------------------------------------
+*.cache
+*.tmp
+*.user
+*.suo
+*.ncrunch*
+project.lock.json
+project.assets.json
+*.nuget.props
+*.nuget.targets
+*.AssemblyInfo.cs
+*.AssemblyInfoInputs.cache
+*.assets.cache
+*.csproj.nuget.*
+.nuget/
+packages/
+msbuild.log
+msbuild.binlog
+
+# ---------------------------------------------------------------------------
+# IDE / editor
+# ---------------------------------------------------------------------------
+.vs/
+.vscode/
+.idea/
+*.swp
+*~
+
+# ---------------------------------------------------------------------------
+# OS noise
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+
+# ---------------------------------------------------------------------------
+# Local secrets / environment
+# ---------------------------------------------------------------------------
+*.env
+.env.local
+appsettings.*.local.json

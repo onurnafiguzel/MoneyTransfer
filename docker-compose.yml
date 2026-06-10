@@ -25,11 +25,26 @@ services:
       ASPNETCORE_ENVIRONMENT: Development
       ASPNETCORE_URLS: "http://+:8080"
       ConnectionStrings__Ledger: "Host=postgres;Port=5432;Database=ledger;Username=ledger;Password=ledger"
+      # TEST hook: lets the K6 suite pick a strategy per request via X-Concurrency-Strategy. Off in production.
+      Ledger__AllowStrategyOverride: "true"
     ports:
       - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
+
+  # K6 load tests (opt-in). Run e.g.:
+  #   docker compose run --rm k6 run /scripts/01-race-withdrawals.js
+  #   docker compose run --rm -e STRATEGY=naive k6 run /scripts/01-race-withdrawals.js
+  k6:
+    image: grafana/k6:latest
+    profiles: [test]
+    environment:
+      BASE_URL: "http://api:8080"
+    volumes:
+      - ./k6:/scripts
+    depends_on:
+      - api
 
 volumes:
   pgdata:

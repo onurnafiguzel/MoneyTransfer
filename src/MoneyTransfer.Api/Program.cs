@@ -16,6 +16,15 @@ var connectionString = builder.Configuration.GetConnectionString("Ledger")
 
 builder.Services.AddDbContext<LedgerDbContext>(o =>
     o.UseNpgsql(connectionString).UseSnakeCaseNamingConvention());
+
+// Concurrency strategies (swappable behind IBalanceMutator; selection is a config decision).
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddKeyedScoped<IBalanceMutator, NaiveMutator>("naive");
+builder.Services.AddKeyedScoped<IBalanceMutator, PessimisticMutator>("pessimistic");
+builder.Services.AddKeyedScoped<IBalanceMutator, ConditionalUpdateMutator>("conditional");
+builder.Services.AddKeyedScoped<IBalanceMutator, OptimisticCasMutator>("optimistic");
+builder.Services.AddScoped<IBalanceMutatorResolver, BalanceMutatorResolver>();
+
 builder.Services.AddScoped<LedgerService>();
 builder.Services.AddProblemDetails();
 
@@ -35,6 +44,7 @@ app.MapGet("/", () => Results.Ok(new { service = "MoneyTransfer", phase = 1, sta
 app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
 
 // Vertical-slice endpoints
+app.MapCreateAccount();
 app.MapCreateTransfer();
 app.MapGetTransfer();
 app.MapReverseTransfer();

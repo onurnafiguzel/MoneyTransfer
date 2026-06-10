@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using MoneyTransfer.Api.Domain;
 using MoneyTransfer.Api.Infrastructure.Persistence;
 using Npgsql;
@@ -10,44 +11,60 @@ public enum MovementError { None, AccountNotFound, CurrencyMismatch, Insufficien
 public enum ReverseError { None, NotFound, AlreadyReversed, InsufficientFunds, AccountNotFound }
 
 /// <summary>
-/// NAIVE Phase-1 money-movement engine. It loads balances, checks invariants in app code, then writes
-/// — all in a single <c>SaveChanges</c>, i.e. one DB transaction, so a movement is atomic (all-or-nothing).
-///
-/// What it deliberately does NOT do yet: protect the read-modify-write against concurrency. Two requests
-/// can both read the same balance and overwrite each other (lost update / overspend). Hardening this race
-/// (pessimistic locking / atomic conditional update / optimistic CAS) is a dedicated later feature, where
-/// this single class becomes the one place that changes.
+/// Money-movement engine. Each movement runs in a single DB transaction (atomic). The concurrency-critical
+/// balance mutation is delegated to the configured <see cref="IBalanceMutator"/> strategy (Dapper SQL shares
+/// the EF transaction); LedgerService then writes the immutable double-entry transfer and commits. Transient
+/// DB contention (serialization 40001 / deadlock 40P01) and optimistic-CAS exhaustion are retried with backoff.
 /// </summary>
-public sealed class LedgerService(LedgerDbContext db)
+public sealed class LedgerService(
+    LedgerDbContext db,
+    IBalanceMutatorResolver mutators,
+    IOptions<LedgerOptions> options,
+    ILogger<LedgerService> logger)
 {
-    /// <summary>Moves <paramref name="amount"/> minor units from one account to another within one transaction.</summary>
+    private readonly int _maxRetries = options.Value.MaxConcurrencyRetries;
+
     public async Task<(Transfer? Transfer, MovementError Error)> MoveAsync(
-        Guid fromId,
-        Guid toId, 
-        long amount, 
-        TransferKind kind,
-        string? reason,
-        Guid? reversedTxId, CancellationToken ct)
+        Guid fromId, Guid toId, long amount, TransferKind kind, string? reason, Guid? reversedTxId, CancellationToken ct)
     {
-        var from = await db.Accounts.Include(a => a.Balance).FirstOrDefaultAsync(a => a.Id == fromId, ct);
-        var to = await db.Accounts.Include(a => a.Balance).FirstOrDefaultAsync(a => a.Id == toId, ct);
+        var mutator = mutators.Resolve();
+        var cmd = new MovementCommand(fromId, toId, amount);
 
-        if (from is null || to is null) return (null, MovementError.AccountNotFound);
-        if (!string.Equals(from.Currency, to.Currency, StringComparison.Ordinal)) return (null, MovementError.CurrencyMismatch);
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return await ExecuteOnceAsync(mutator, cmd, kind, reason, reversedTxId, ct);
+            }
+            catch (Exception ex) when (IsTransient(ex) && attempt < _maxRetries)
+            {
+                db.ChangeTracker.Clear(); // discard tracked state from the rolled-back attempt
+                logger.LogWarning("Movement contention (attempt {Attempt}/{Max}): {Error}; retrying", attempt + 1, _maxRetries, ex.GetType().Name);
+                await Task.Delay(BackoffMs(attempt), ct);
+            }
+        }
+    }
 
-        var now = DateTimeOffset.UtcNow;
-        // Domain methods own the balance rules (encapsulated). TryDebit respects AllowsNegative.
-        if (!from.TryDebit(amount, now)) return (null, MovementError.InsufficientFunds);
-        to.Credit(amount, now);
+    private async Task<(Transfer?, MovementError)> ExecuteOnceAsync(
+        IBalanceMutator mutator, MovementCommand cmd, TransferKind kind, string? reason, Guid? reversedTxId, CancellationToken ct)
+    {
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
 
-        var tx = Transfer.Create(kind, reason, reversedTxId, now);
-        // Double-entry: debit (source, negative) + credit (destination, positive) sum to zero.
-        tx.AddEntry(from.Id, -amount, from.Balance.Amount, now);
-        tx.AddEntry(to.Id, amount, to.Balance.Amount, now);
-        db.Transfers.Add(tx);
+        var result = await mutator.ApplyAsync(db, cmd, ct);
+        if (result.Status != MutationStatus.Applied)
+        {
+            await tx.RollbackAsync(ct);
+            return (null, MapError(result.Status));
+        }
 
-        await db.SaveChangesAsync(ct); // single transaction => atomic
-        return (tx, MovementError.None);
+        var transfer = Transfer.Create(kind, reason, reversedTxId, DateTimeOffset.UtcNow);
+        transfer.AddEntry(cmd.FromId, -cmd.Amount, result.FromBalanceAfter, transfer.CreatedAt);
+        transfer.AddEntry(cmd.ToId, cmd.Amount, result.ToBalanceAfter, transfer.CreatedAt);
+        db.Transfers.Add(transfer);
+
+        await db.SaveChangesAsync(ct);   // inserts transfer + entries within the same transaction
+        await tx.CommitAsync(ct);
+        return (transfer, MovementError.None);
     }
 
     /// <summary>Deposit: moves funds from this currency's system (external) account into the user account.</summary>
@@ -67,9 +84,9 @@ public sealed class LedgerService(LedgerDbContext db)
     }
 
     /// <summary>
-    /// Reverses a transfer by creating a compensating movement (a new, immutable transfer).
-    /// A transfer can be reversed at most once (guarded in app + by the ux_transfers_reversed_once unique index).
-    /// Reversing a reversal is allowed (it is just another transfer that hasn't been reversed yet).
+    /// Reverses a transfer by creating a compensating movement (a new, immutable transfer). A transfer can be
+    /// reversed at most once (guarded in app + by the ux_transfers_reversed_once unique index). Reversing a
+    /// reversal is allowed (it is just another transfer that hasn't been reversed yet).
     /// </summary>
     public async Task<(Transfer? Reversal, ReverseError Error)> ReverseAsync(Guid txId, string? reason, CancellationToken ct)
     {
@@ -108,4 +125,21 @@ public sealed class LedgerService(LedgerDbContext db)
             .Select(a => (Guid?)a.Id)
             .FirstOrDefaultAsync(ct);
     }
+
+    private static MovementError MapError(MutationStatus status) => status switch
+    {
+        MutationStatus.InsufficientFunds => MovementError.InsufficientFunds,
+        MutationStatus.CurrencyMismatch => MovementError.CurrencyMismatch,
+        _ => MovementError.AccountNotFound,
+    };
+
+    private static bool IsTransient(Exception ex) =>
+        ex is ConcurrencyConflictException
+        || (ex is PostgresException pg && IsTransientSqlState(pg.SqlState))
+        || (ex is DbUpdateException { InnerException: PostgresException inner } && IsTransientSqlState(inner.SqlState));
+
+    private static bool IsTransientSqlState(string? sqlState) =>
+        sqlState is PostgresErrorCodes.SerializationFailure or PostgresErrorCodes.DeadlockDetected;
+
+    private static int BackoffMs(int attempt) => (int)(Math.Pow(2, attempt) * 5) + Random.Shared.Next(0, 15);
 }

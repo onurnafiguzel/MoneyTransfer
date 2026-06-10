@@ -14,4 +14,13 @@ public sealed class LedgerOptions
     /// non-empty default (a well-known .NET options gotcha), which would duplicate entries. Config owns this.
     /// </summary>
     public string[] Currencies { get; set; } = [];
+
+    /// <summary>Active concurrency strategy: ConditionalUpdate (default) | Pessimistic | OptimisticCas | Naive.</summary>
+    public string ConcurrencyStrategy { get; set; } = "ConditionalUpdate";
+
+    /// <summary>When true, an X-Concurrency-Strategy request header may override the strategy (TEST hook). Keep false in production.</summary>
+    public bool AllowStrategyOverride { get; set; }
+
+    /// <summary>Bounded retries for transient contention (serialization/deadlock) and optimistic CAS.</summary>
+    public int MaxConcurrencyRetries { get; set; } = 8;
 }

@@ -36,8 +36,10 @@ public static class DbSeeder
         await db.SaveChangesAsync(ct);
 
         // Fund demo accounts through the same engine real requests use (system -> user).
+        // Seeding is an internal, one-shot operation (no HTTP request) → no idempotency key/hash; the
+        // ux_transfers_idem partial index ignores NULL keys, so these seed transfers are unconstrained.
         var ledger = sp.GetRequiredService<LedgerService>();
-        await ledger.DepositAsync(Alice, 100_000, "seed funding", ct); // 1,000.00 USD
-        await ledger.DepositAsync(Carol, 50_000, "seed funding", ct);  //   500.00 EUR
+        await ledger.DepositAsync(Alice, 100_000, "seed funding", idempotencyKey: null, requestHash: null, ct); // 1,000.00 USD
+        await ledger.DepositAsync(Carol, 50_000, "seed funding", idempotencyKey: null, requestHash: null, ct);  //   500.00 EUR
     }
 }

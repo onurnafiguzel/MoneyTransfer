@@ -13,6 +13,9 @@ public static class ApiResults
             title: code,
             extensions: new Dictionary<string, object?> { ["code"] = code });
 
+    public static IResult BadRequest(string code, string detail) =>
+        Problem(StatusCodes.Status400BadRequest, code, detail);
+
     public static IResult UnprocessableEntity(string code, string detail) =>
         Problem(StatusCodes.Status422UnprocessableEntity, code, detail);
 

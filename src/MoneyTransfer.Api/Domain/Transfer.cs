@@ -29,13 +29,17 @@ public class Transfer
 
     public IReadOnlyList<LedgerEntry> Entries => _entries;
 
-    public static Transfer Create(TransferKind kind, string? reason, Guid? reversedTxId, DateTimeOffset now, Guid? id = null) =>
+    public static Transfer Create(
+        TransferKind kind, string? reason, Guid? reversedTxId, DateTimeOffset now,
+        string? idempotencyKey = null, string? requestHash = null, Guid? id = null) =>
         new()
         {
             Id = id ?? Guid.CreateVersion7(),
             Kind = kind,
             Reason = reason,
             ReversedTxId = reversedTxId,
+            IdempotencyKey = idempotencyKey,
+            RequestHash = requestHash,
             CreatedAt = now,
         };
 

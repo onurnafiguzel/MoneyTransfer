@@ -3,9 +3,21 @@ import { check } from 'k6';
 
 export const BASE = __ENV.BASE_URL || 'http://localhost:8080';
 
-// Pin a concurrency strategy per request (honored only when the API has AllowStrategyOverride=true).
-export function headers(strategy) {
-  const h = { 'Content-Type': 'application/json' };
+// Unique-enough idempotency key per call. Each write is a DISTINCT logical request unless a caller passes an
+// explicit key (the idempotency test reuses ONE key on purpose to prove dedup).
+let _keySeq = 0;
+export function newKey() {
+  // __VU/__ITER aren't defined in setup()/teardown() — guard so the helper works in every k6 lifecycle stage.
+  const vu = typeof __VU !== 'undefined' ? __VU : 0;
+  const it = typeof __ITER !== 'undefined' ? __ITER : 0;
+  return `k6-${vu}-${it}-${Date.now()}-${_keySeq++}-${Math.random().toString(16).slice(2)}`;
+}
+
+// Headers for a write request. Always carries an Idempotency-Key (required by the API on POST money moves);
+// pass `idemKey` to reuse a fixed key. `strategy` pins the concurrency strategy (honored only when the API
+// has AllowStrategyOverride=true).
+export function headers(strategy, idemKey) {
+  const h = { 'Content-Type': 'application/json', 'Idempotency-Key': idemKey || newKey() };
   if (strategy) h['X-Concurrency-Strategy'] = strategy;
   return h;
 }

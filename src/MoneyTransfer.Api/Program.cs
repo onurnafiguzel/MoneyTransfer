@@ -4,6 +4,7 @@ using MoneyTransfer.Api.Features.Deposits;
 using MoneyTransfer.Api.Features.Transfers;
 using MoneyTransfer.Api.Features.Withdrawals;
 using MoneyTransfer.Api.Infrastructure;
+using MoneyTransfer.Api.Infrastructure.Idempotency;
 using MoneyTransfer.Api.Infrastructure.Movement;
 using MoneyTransfer.Api.Infrastructure.Persistence;
 
@@ -26,6 +27,11 @@ builder.Services.AddKeyedScoped<IBalanceMutator, OptimisticCasMutator>("optimist
 builder.Services.AddScoped<IBalanceMutatorResolver, BalanceMutatorResolver>();
 
 builder.Services.AddScoped<LedgerService>();
+
+// Idempotency (Step A — DB-backed dedup + request hashing collision guard; Redis layer comes next).
+builder.Services.AddSingleton<RequestHasher>();
+builder.Services.AddScoped<IdempotencyService>();
+
 builder.Services.AddProblemDetails();
 
 var app = builder.Build();

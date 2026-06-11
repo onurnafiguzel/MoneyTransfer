@@ -506,3 +506,65 @@ okumanın baskın olduğu profillerde doğru araçtır.
 
 Mimari karar kaydı: [adr-0001-concurrency-strategy.md](adr-0001-concurrency-strategy.md).
 Yan yana kod karşılaştırması: [concurrency-strategies.md](concurrency-strategies.md).
+
+---
+
+## Hepsi Bir Arada — Karar Şeması ve Genişletilmiş Kıyas
+
+Yukarıdaki dört yöntem tek bir kararın farklı dallarıdır: *"Bu invariant'ı, yarışı kaybeden
+işlemi nasıl ele alarak koruyacağım?"* Aşağıdaki şema, bir invariant verildiğinde **hangi
+stratejinin** doğru olduğunu adım adım seçtirir.
+
+### Karar şeması (hangi durumda hangisi?)
+
+```mermaid
+flowchart TD
+    S[Bir bakiye invariant'ını<br/>yarış-güvenli uygulamam gerek] --> Q1{Üretim mi?<br/>yoksa sadece<br/>yarışı göstermek mi?}
+    Q1 -->|Sadece demo| NAIVE["**Naive**<br/>kilitsiz oku-hesapla-yaz<br/>⚠ veri bozar"]
+    Q1 -->|Üretim| Q2{İnvariant TEK bir<br/>SQL koşuluyla<br/>ifade edilebilir mi?}
+
+    Q2 -->|Evet<br/>ör. amount - x >= 0| Q3{Çekişme profili?}
+    Q2 -->|Hayır<br/>çok-satırlı / karmaşık kural| PESS["**Pessimistic A**<br/>SELECT … FOR UPDATE<br/>satırları sırayla kilitle"]
+
+    Q3 -->|Yüksek / sıcak hesap| COND["**Conditional B** ⭐<br/>koşulu WHERE'e göm CTE<br/>en yüksek throughput"]
+    Q3 -->|Düşük, okuma-yoğun| Q4{Kilit beklemesini<br/>tamamen elemek<br/>istiyor musun?}
+    Q4 -->|Evet| OPT["**Optimistic C**<br/>WHERE version=@v CAS<br/>kaybedeni yeniden denet"]
+    Q4 -->|Hayır, basit dursun| COND
+
+    style NAIVE fill:#7a1f1f,color:#fff
+    style PESS fill:#1f4f7a,color:#fff
+    style OPT fill:#6f5a1f,color:#fff
+    style COND fill:#1f6f3a,color:#fff
+```
+
+> Bu projedeki invariant ("`allows_negative` değilse bakiye < 0 olmasın") **tek koşulluk**
+> olduğu ve hesaplar sıcak olabildiği için ağaç **Conditional (B)**'ye iner — varsayılan budur.
+
+### Genişletilmiş kıyas (çok boyutlu)
+
+Özet tablo "ne zaman hangisi"yi verir; bu tablo ise her stratejinin **operasyonel davranışını**
+boyut boyut karşılaştırır — bir mülakatta "neden B?" sorusunun arkasındaki nüanslar burada.
+
+| Boyut | Naive | Pessimistic (A) | Optimistic (C) | Conditional (B) ⭐ |
+|---|---|---|---|---|
+| **Yarışı önleme mekanizması** | Yok | Satır kilidi (önce kilitle) | Versiyon token + CAS | Koşulu canlı kilitli değere gömme |
+| **TOCTOU penceresi** | **Açık** (bozar) | Kapalı (kilit altında okur) | Kapalı (CAS yazımda doğrular) | **Hiç açılmaz** (app'e okumaz) |
+| **Kilit türü / süresi** | — (sıradan UPDATE) | Açık kilit, **tüm txn boyunca** | Kilit yok | Yalnızca UPDATE anı (satır serileşmesi) |
+| **DB round-trip (debit)** | 1 oku + 1 yaz | 1 kilitli oku + 1 yaz | 1 oku + 1 CAS (×retry) | **1 koşullu UPDATE** (CTE'de credit dahil) |
+| **Deadlock riski** | Düşük (ama lost update) | **Var** → `ORDER BY` + DISTINCT ile önlenir | Yok (kilitsiz) | İhmal edilebilir (tek satır, sıralı erişim) |
+| **Retry gereği** | Yok (sessizce bozar) | Genelde yok (bekler) | **Var** (CAS 0 satır → yeniden oku) | Yok (guard 0 satır → temiz `insufficient`) |
+| **Sıcak hesapta davranış** | Veri bozulur | Bekleyenler birikir → throughput düşer | Retry fırtınası / livelock riski | **En iyi** — kısa kilit, beklemesiz |
+| **"0 satır" anlamı** | — | Net (kilit altında kontrol) | Çakışma (retry) | Belirsiz → küçük preflight ile ayrıştırılır |
+| **Çok-satırlı karmaşık kural** | — | **En uygun** | Zor (her satıra ayrı CAS) | Zor (tek yükleme sığmaz) |
+| **Üretim uygunluğu** | ❌ Asla | ✅ Karmaşık kilitlemede | ✅ Nadir çekişmede | ✅ **Varsayılan** |
+
+### Tek cümlelik özet (senaryo → strateji)
+
+- **"Yarışın gerçek olduğunu kanıtlamam lazım"** → **Naive** (yalnızca test/eğitim).
+- **"Tek transaction'da birden çok bakiyeyi karmaşık bir kuralla birlikte kilitlemeliyim"** → **Pessimistic (A)**.
+- **"Çakışma nadir, yük okuma-ağırlıklı, kilit beklemesi istemiyorum"** → **Optimistic (C)**.
+- **"İnvariant tek SQL koşulu, hesaplar sıcak, en yüksek throughput şart"** → **Conditional (B)** ⭐.
+
+> Dördü de **aynı atomik transaction** ve **aynı retry/izolasyon çerçevesi** (bkz. [Üretim
+> Sertleştirmesi](#üretim-sertleştirmesi-tüm-stratejiler-için-ortak)) içinde çalışır — aralarındaki
+> fark yalnızca *debiti yarıştan koruma yöntemidir*, çevreleyen üretim disiplini ortaktır.
